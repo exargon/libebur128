@@ -1148,6 +1148,93 @@ ebur128_gated_loudness(ebur128_state** sts, size_t size, double* out) {
   return EBUR128_SUCCESS;
 }
 
+static int
+ebur128_gated_loudness_limited(ebur128_state** sts, size_t size, double threshold, double* out, double* limited_out, double* ratio) {
+  struct ebur128_dq_entry* it;
+  double gated_loudness = 0.0;
+  double gated_loudness_limited = 0.0;
+  double relative_threshold = 0.0;
+  size_t above_thresh_counter = 0;
+  size_t above_limit_counter = 0;
+  size_t i, j, start_index, end_index;
+
+  for (i = 0; i < size; i++) {
+    if (sts[i] && (sts[i]->mode & EBUR128_MODE_I) != EBUR128_MODE_I) {
+      return EBUR128_ERROR_INVALID_MODE;
+    }
+  }
+
+  for (i = 0; i < size; i++) {
+    if (!sts[i]) {
+      continue;
+    }
+    ebur128_calc_relative_threshold(sts[i], &above_thresh_counter,
+                                    &relative_threshold);
+  }
+  if (!above_thresh_counter) {
+    *out = -HUGE_VAL;
+    return EBUR128_SUCCESS;
+  }
+
+  relative_threshold /= (double) above_thresh_counter;
+  relative_threshold *= relative_gate_factor;
+
+  above_thresh_counter = 0;
+  if (relative_threshold < histogram_energy_boundaries[0]) {
+    start_index = 0;
+  } else {
+    start_index = find_histogram_index(relative_threshold);
+    if (relative_threshold > histogram_energies[start_index]) {
+      ++start_index;
+    }
+  }
+  end_index = find_histogram_index(threshold);
+  for (i = 0; i < size; i++) {
+    if (!sts[i]) {
+      continue;
+    }
+    if (sts[i]->d->use_histogram) {
+      for (j = start_index; j < 1000; ++j) {
+        gated_loudness +=
+            sts[i]->d->block_energy_histogram[j] * histogram_energies[j];
+        above_thresh_counter += sts[i]->d->block_energy_histogram[j];
+      }
+      for (j = start_index; j < end_index; ++j) {
+          gated_loudness_limited +=
+             sts[i]->d->block_energy_histogram[j] * histogram_energies[j];
+      }
+      for (j = end_index; j < 1000; ++j) {
+          gated_loudness_limited +=
+             sts[i]->d->block_energy_histogram[j] * histogram_energies[end_index];
+      }
+    } else {
+      STAILQ_FOREACH(it, &sts[i]->d->block_list, entries) {
+        if (it->z >= relative_threshold) {
+          ++above_thresh_counter;
+          gated_loudness += it->z;
+          if (it->z >= threshold) {
+              ++above_limit_counter;
+              gated_loudness_limited += histogram_energies[end_index];
+          }
+          else {
+              gated_loudness_limited += it->z;
+          }
+        }
+      }
+    }
+  }
+  if (!above_thresh_counter) {
+    *out = -HUGE_VAL;
+    return EBUR128_SUCCESS;
+  }
+  gated_loudness /= (double) above_thresh_counter;
+  gated_loudness_limited /= above_thresh_counter;
+  *out = ebur128_energy_to_loudness(gated_loudness);
+  *limited_out = ebur128_energy_to_loudness(gated_loudness_limited);
+  *ratio = (double) above_limit_counter / (double) above_thresh_counter;
+  return EBUR128_SUCCESS;
+}
+
 int ebur128_relative_threshold(ebur128_state* st, double* out) {
   double relative_threshold = 0.0;
   size_t above_thresh_counter = 0;
@@ -1173,6 +1260,10 @@ int ebur128_relative_threshold(ebur128_state* st, double* out) {
 
 int ebur128_loudness_global(ebur128_state* st, double* out) {
   return ebur128_gated_loudness(&st, 1, out);
+}
+
+int ebur128_loudness_global_limited(ebur128_state* st, double threshold_lufs, double* out, double* out_limited, double* ratio) {
+  return ebur128_gated_loudness_limited(&st, 1, pow(10.0, threshold_lufs / 10.0), out, out_limited, ratio);
 }
 
 int ebur128_loudness_global_multiple(ebur128_state** sts,
